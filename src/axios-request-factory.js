@@ -19,11 +19,8 @@ class AxiosRequestFactory {
 		/** @type {number} */
 		this._rateLimitUntil = null;
 
-		/** @type {{res: (value: any) => void, rej: (reason: any) => void, axiosConfig: import('axios').AxiosRequestConfig, options: any, failedAttempts: number}[][]} */
-		this._queues = [];
-		for (let i = 0; i < 10; i += 1) {
-			this._queues.push([]);
-		}
+		/** @type {{res: (value: any) => void, rej: (reason: any) => void, axiosConfig: import('axios').AxiosRequestConfig, options: any, failedAttempts: number}[]} */
+		this._queue = [];
 		/** @type {{res: (value: any) => void, rej: (reason: any) => void, axiosConfig: import('axios').AxiosRequestConfig, options: any, failedAttempts: number}[]} */
 		this._specialRetryQueue = [];
 
@@ -35,16 +32,13 @@ class AxiosRequestFactory {
 
 	addQueueItemToQueue(obj) {
 
-		const priority = obj.priority;
-
-		const queue = this._queues[priority];
-
-		if (queue === undefined) {
-			rej(new Error(`Priority ${priority} is not valid for request factory. Must be an integer between 0 and ${this._queues.length - 1}`));
-			return;
+		if (obj.priority === undefined || typeof obj.priority === 'number') {
+			// pass
+		} else {
+			throw new Error(`Priority ${obj.priority} is not valid for request factory. Must be a number if specified`);
 		}
 
-		queue.push(obj);
+		this._queue.push(obj);
 
 	}
 
@@ -52,19 +46,36 @@ class AxiosRequestFactory {
 		if (this._specialRetryQueue.length !== 0) {
 			return this._specialRetryQueue.shift();
 		}
-		for (let i = this._queues.length - 1; i >= 0; i -= 1) {
-			const queue = this._queues[i];
-			if (queue.length !== 0) {
-				return queue.shift();
+		let currentObj;
+		let currentPriority;
+		let currentIndex;
+		for (let i = 0; i < this._queue.length - 1; i += 1) {
+			const obj = this._queue[i];
+			const priorty = obj.options.priority ?? 5;
+			if (currentObj === undefined) {
+				currentObj = obj;
+				currentIndex = i;
+				currentPriority = priorty;
+				continue;
+			}
+			if (priorty > currentPriority) {
+				currentObj = obj;
+				currentIndex = i;
+				currentPriority = priorty;
+				continue;
 			}
 		}
-		return undefined;
+		if (currentObj === undefined) {
+			return undefined;
+		}
+		this._queue.splice(currentIndex, 1);
+		return currentObj;
 	}
 
 	/**
 	 * 
 	 * @param {import('axios').AxiosRequestConfig} axiosConfig 
-	 * @param {{doPriority: boolean, priority: number}} options Priority 9 is high priority and priority 1 is low priority
+	 * @param {{priority: number}} options Priority 9 is high priority and priority 1 is low priority
 	 * @returns {Promise<import('axios').AxiosResponse>} 
 	 */
 	request(axiosConfig, options) {
@@ -76,12 +87,13 @@ class AxiosRequestFactory {
 				return;
 			}
 
-			// do Priority is for backward compatibility
-			const priority = (options?.doPriority ? 9 : options?.priority) ?? 5;
+			const obj = {res, rej, axiosConfig, options, failedAttempts: 0};
 
-			const obj = {res, rej, axiosConfig, options, priority, failedAttempts: 0};
-
-			this.addQueueItemToQueue(obj);
+			try {
+				this.addQueueItemToQueue(obj);
+			} catch (err) {
+				rej(err);
+			}
 
 			this.triggerNext();
 
