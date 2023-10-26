@@ -51,7 +51,7 @@ class AxiosRequestFactory {
 		let currentIndex;
 		for (let i = 0; i < this._queue.length - 1; i += 1) {
 			const obj = this._queue[i];
-			const priorty = obj.options.priority ?? 5;
+			const priorty = obj.options?.priority ?? 5;
 			if (currentObj === undefined) {
 				currentObj = obj;
 				currentIndex = i;
@@ -145,7 +145,6 @@ class AxiosRequestFactory {
 		let errored = false;
 		let err;
 		let next;
-		let allowReattemptIfFail = true;
 		let countAsAttemptOnFailure = true;
 
 		try {
@@ -198,6 +197,10 @@ class AxiosRequestFactory {
 
 		}
 
+		const reattemptOn = (await getValue(this._opts?.reattemptOn)) ?? ['NoStatusCode'];
+
+		const statusForReattempt = resp?.status ?? 'NoStatusCode';
+
 		try {
 
 			// TODO: To add more handling here
@@ -218,7 +221,7 @@ class AxiosRequestFactory {
 				// Assuming next is defined, we either need to add it back to the front of the queue it reject/resolve its promise
 				if (next) {
 					if (errored) {
-						if (allowReattemptIfFail) {
+						if (reattemptOn.includes(statusForReattempt)) {
 							if (countAsAttemptOnFailure) {
 								next.failedAttempts += 1;
 							}
