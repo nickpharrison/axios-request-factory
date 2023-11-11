@@ -49,7 +49,7 @@ class AxiosRequestFactory {
 		let currentObj;
 		let currentPriority;
 		let currentIndex;
-		for (let i = 0; i < this._queue.length - 1; i += 1) {
+		for (let i = 0; i < this._queue.length; i += 1) {
 			const obj = this._queue[i];
 			const priorty = obj.options?.priority ?? 5;
 			if (currentObj === undefined) {
