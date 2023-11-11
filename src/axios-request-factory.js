@@ -186,6 +186,13 @@ class AxiosRequestFactory {
 			// Wait again for any rate limiting to finish because some might have been introduced since we checked before
 			await this._waitForRateLimit();
 
+			const preExecuteCallback = next.options.preExecuteCallback
+			if (typeof preExecuteCallback === 'function') {
+				await preExecuteCallback({
+					previousAttempts: next.failedAttempts ?? 0,
+				});
+			}
+
 			// Make the actual request
 			resp = await this.axios(next.axiosConfig);
 
