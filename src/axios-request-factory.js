@@ -87,6 +87,10 @@ class AxiosRequestFactory {
 				return;
 			}
 
+			if (options == null) {
+				options = {};
+			}
+
 			const obj = {res, rej, axiosConfig, options, failedAttempts: 0};
 
 			try {
