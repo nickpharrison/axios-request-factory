@@ -153,60 +153,60 @@ class AxiosRequestFactory {
 		let next;
 		let countAsAttemptOnFailure = true;
 
-		// Wait for any rate limiting to finish
-		await this._waitForRateLimit();
-
-		// Check to see if we already have the maximum number of requests going on
-		const [maxOngoingRequests] = await Promise.all([
-			getValue(this._opts?.maxOngoingRequests)
-		]);
-		if (maxOngoingRequests != null && this._currentOngoingRequests >= maxOngoingRequests) {
-			return;
-		}
-
-		// Check to see if there's actually another request to do (I know we checked before, but in case it changed after the awaits)
-		next = this.getNextQueueItem();
-		if (next == null) {
-			return;
-		}
-		this._currentOngoingRequests += 1;
-
-		// Create headers object if it doesn't exist and make a shorthand for it
-		if (next.axiosConfig.headers == null) {
-			next.axiosConfig.headers = {};
-		}
-		const headers = next.axiosConfig.headers;
-
-		// Get any variables
-		const [authHeader] = await Promise.all([
-			headers['Authorization'] === undefined ? getValue(this._opts?.authHeader) : null, // Don't bother fetching the authHeader if we already have "Authorization" header set
-		]);
-
-		// Set the authorization header if we got one back
-		if (authHeader) {
-			headers['Authorization'] = authHeader;
-		}
-
-		// Execute callbacks
-		await next.options?.beforeExec?.({
-			axiosConfig: next.axiosConfig,
-			resp: resp,
-			previousAttempts: next.failedAttempts ?? 0,
-		});
-
-		await this._opts?.beforeExec?.({
-			axiosConfig: next.axiosConfig,
-			previousAttempts: next.failedAttempts ?? 0,
-		});
-
-		// Wait again for any rate limiting to finish because some might have been introduced since we checked before
-		await this._waitForRateLimit();
-
-		if (global.axios_request_factory_debug || this._opts?.debug) {
-			console.log(`[ARF#${this._id}] Start: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
-		}
-
 		try {
+
+			// Wait for any rate limiting to finish
+			await this._waitForRateLimit();
+
+			// Check to see if we already have the maximum number of requests going on
+			const [maxOngoingRequests] = await Promise.all([
+				getValue(this._opts?.maxOngoingRequests)
+			]);
+			if (maxOngoingRequests != null && this._currentOngoingRequests >= maxOngoingRequests) {
+				return;
+			}
+
+			// Check to see if there's actually another request to do (I know we checked before, but in case it changed after the awaits)
+			next = this.getNextQueueItem();
+			if (next == null) {
+				return;
+			}
+			this._currentOngoingRequests += 1;
+
+			// Create headers object if it doesn't exist and make a shorthand for it
+			if (next.axiosConfig.headers == null) {
+				next.axiosConfig.headers = {};
+			}
+			const headers = next.axiosConfig.headers;
+
+			// Get any variables
+			const [authHeader] = await Promise.all([
+				headers['Authorization'] === undefined ? getValue(this._opts?.authHeader) : null, // Don't bother fetching the authHeader if we already have "Authorization" header set
+			]);
+
+			// Set the authorization header if we got one back
+			if (authHeader) {
+				headers['Authorization'] = authHeader;
+			}
+
+			// Execute callbacks
+			await next.options?.beforeExec?.({
+				axiosConfig: next.axiosConfig,
+				resp: resp,
+				previousAttempts: next.failedAttempts ?? 0,
+			});
+
+			await this._opts?.beforeExec?.({
+				axiosConfig: next.axiosConfig,
+				previousAttempts: next.failedAttempts ?? 0,
+			});
+
+			// Wait again for any rate limiting to finish because some might have been introduced since we checked before
+			await this._waitForRateLimit();
+
+			if (globalThis.axios_request_factory_debug || this._opts?.debug) {
+				console.log(`[ARF#${this._id}] Start: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
+			}
 
 			// Make the actual request
 			resp = await this.axios(next.axiosConfig);
@@ -219,7 +219,7 @@ class AxiosRequestFactory {
 
 		}
 
-		if (global.axios_request_factory_debug || this._opts?.debug) {
+		if (globalThis.axios_request_factory_debug || this._opts?.debug) {
 			if (errored) {
 				console.error(`[ARF#${this._id}] Error: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
 			} else {
