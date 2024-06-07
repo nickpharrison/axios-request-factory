@@ -1,6 +1,6 @@
 {
   "name": "axios-request-factory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A wrapper for Axios to handle various processes around making http(s) requests. Such as auth handling, queueing requests, rate-limiting etc",
   "main": "src/index.js",
   "scripts": {
