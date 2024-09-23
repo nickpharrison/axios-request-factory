@@ -1,13 +1,13 @@
 
 import { AxiosRequestConfig, AxiosResponse } from 'axios';
 
-type AxiosRequestFactoryRequestOptions = {
+interface AxiosRequestFactoryRequestOptions {
 	id?: string;
 	axiosInstanceOptions: AxiosRequestConfig;
 	logger?: any;
 }
 
-type AxiosRequestFactoryConstructorOptions = {
+interface AxiosRequestFactoryConstructorOptions {
 	priority?: number;
 }
 
