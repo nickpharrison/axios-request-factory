@@ -1,13 +1,13 @@
 
 import { AxiosRequestConfig, AxiosResponse } from 'axios';
 
-interface AxiosRequestFactoryRequestOptions {
+interface AxiosRequestFactoryConstructorOptions {
 	id?: string;
 	axiosInstanceOptions: AxiosRequestConfig;
 	logger?: any;
 }
 
-interface AxiosRequestFactoryConstructorOptions {
+interface AxiosRequestFactoryRequestOptions {
 	priority?: number;
 }
 
@@ -15,6 +15,6 @@ export class AxiosRequestFactory {
 
 	constructor(options?: AxiosRequestFactoryConstructorOptions)
 
-	request(axiosConfig: AxiosRequestConfig, options?: AxiosRequestFactoryOptions): Promise<AxiosResponse>
+	request(axiosConfig: AxiosRequestConfig, options?: AxiosRequestFactoryRequestOptions): Promise<AxiosResponse>
 
 }
