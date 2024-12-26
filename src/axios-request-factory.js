@@ -8,6 +8,12 @@ const getValue = async (input) => {
 	return input;
 }
 
+class CancellationError extends Error {
+	constructor() {
+		super('Cancellation requested');
+	}
+}
+
 class AxiosRequestFactory {
 
 	constructor(opts) {
@@ -53,6 +59,12 @@ class AxiosRequestFactory {
 		let currentIndex;
 		for (let i = 0; i < this._queue.length; i += 1) {
 			const obj = this._queue[i];
+			if (obj.options?.cancellationToken?.isCancelled) {
+				// If cancelled, remove from queue
+				this._queue.splice(i, 1);
+				i -= 1;
+				continue;
+			}
 			const priorty = obj.options?.priority ?? 5;
 			if (currentObj === undefined) {
 				currentObj = obj;
@@ -173,6 +185,9 @@ class AxiosRequestFactory {
 			}
 			this._currentOngoingRequests += 1;
 
+			// Check for cancellation at beginning
+			if (next.options?.cancellationToken?.isCancelled) throw new CancellationError();
+
 			// Create headers object if it doesn't exist and make a shorthand for it
 			if (next.axiosConfig.headers == null) {
 				next.axiosConfig.headers = {};
@@ -183,6 +198,9 @@ class AxiosRequestFactory {
 			const [authHeader] = await Promise.all([
 				headers['Authorization'] === undefined ? getValue(this._opts?.authHeader) : null, // Don't bother fetching the authHeader if we already have "Authorization" header set
 			]);
+
+			// Check for cancellation after fetching auth
+			if (next.options?.cancellationToken?.isCancelled) throw new CancellationError();
 
 			// Set the authorization header if we got one back
 			if (authHeader) {
@@ -204,6 +222,9 @@ class AxiosRequestFactory {
 			// Wait again for any rate limiting to finish because some might have been introduced since we checked before
 			await this._waitForRateLimit();
 
+			// Check for cancellation before making actual requests (after beforeExec commands)
+			if (next.options?.cancellationToken?.isCancelled) throw new CancellationError();
+
 			if (globalThis.axios_request_factory_debug || this._opts?.debug) {
 				console.log(`[ARF#${this._id}] Start: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
 			}
@@ -221,10 +242,17 @@ class AxiosRequestFactory {
 
 		if (globalThis.axios_request_factory_debug || this._opts?.debug) {
 			if (errored) {
+				if (err instanceof CancellationError) {
+					console.warn(`[ARF#${this._id}] Cncld: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
+				}
 				console.error(`[ARF#${this._id}] Error: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
 			} else {
 				console.log(`[ARF#${this._id}]  Done: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
 			}
+		}
+		// If errored, exit
+		if (errored && err instanceof CancellationError) {
+			return;
 		}
 
 		// Execute callbacks
