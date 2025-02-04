@@ -225,12 +225,23 @@ class AxiosRequestFactory {
 			// Check for cancellation before making actual requests (after beforeExec commands)
 			if (next.options?.cancellationToken?.isCancelled) throw new CancellationError();
 
-			if (globalThis.axios_request_factory_debug || this._opts?.debug) {
-				console.log(`[ARF#${this._id}] Start: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
-			}
+			// Get mock response
+			const mockRepsonse = await getValue(this._opts?.mockResponse);
 
-			// Make the actual request
-			resp = await this.axios(next.axiosConfig);
+			if (mockRepsonse == null) {
+
+				if (globalThis.axios_request_factory_debug || this._opts?.debug) {
+					console.log(`[ARF#${this._id}] Start: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
+				}
+
+				// Make the actual request
+				resp = await this.axios(next.axiosConfig);
+
+			} else {
+
+				resp = mockRepsonse;
+
+			}
 
 		} catch (e) {
 
