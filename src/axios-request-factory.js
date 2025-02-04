@@ -226,7 +226,7 @@ class AxiosRequestFactory {
 			if (next.options?.cancellationToken?.isCancelled) throw new CancellationError();
 
 			// Get mock response
-			const mockRepsonse = await getValue(this._opts?.mockResponse);
+			const mockRepsonse = (await getValue(next.options?.mockResponse)) ?? await getValue(this._opts?.mockResponse);
 
 			if (mockRepsonse == null) {
 
