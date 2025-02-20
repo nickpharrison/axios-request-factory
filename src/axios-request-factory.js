@@ -1,17 +1,18 @@
 
 const axios = require('axios').default;
+let fs;
+if (typeof window === 'undefined') {
+	try {
+		fs = require('fs');
+	} catch (err) {
+	}
+}
 
 const getValue = async (input) => {
 	if (typeof input === 'function') {
 		return await input();
 	}
 	return input;
-}
-
-class CancellationError extends Error {
-	constructor() {
-		super('Cancellation requested');
-	}
 }
 
 class AxiosRequestFactory {
@@ -46,7 +47,14 @@ class AxiosRequestFactory {
 			throw new Error(`Priority ${obj.priority} is not valid for request factory. Must be a number if specified`);
 		}
 
-		this._queue.push(obj);
+		this.readFromCache(obj).then((result) => {
+			if (result) {
+				obj.res(result);
+			} else {
+				this._queue.push(obj);
+				this.triggerNext();	
+			}
+		});
 
 	}
 
@@ -59,12 +67,6 @@ class AxiosRequestFactory {
 		let currentIndex;
 		for (let i = 0; i < this._queue.length; i += 1) {
 			const obj = this._queue[i];
-			if (obj.options?.cancellationToken?.isCancelled) {
-				// If cancelled, remove from queue
-				this._queue.splice(i, 1);
-				i -= 1;
-				continue;
-			}
 			const priorty = obj.options?.priority ?? 5;
 			if (currentObj === undefined) {
 				currentObj = obj;
@@ -112,8 +114,6 @@ class AxiosRequestFactory {
 			} catch (err) {
 				rej(err);
 			}
-
-			this.triggerNext();
 
 		});
 
@@ -185,9 +185,6 @@ class AxiosRequestFactory {
 			}
 			this._currentOngoingRequests += 1;
 
-			// Check for cancellation at beginning
-			if (next.options?.cancellationToken?.isCancelled) throw new CancellationError();
-
 			// Create headers object if it doesn't exist and make a shorthand for it
 			if (next.axiosConfig.headers == null) {
 				next.axiosConfig.headers = {};
@@ -198,9 +195,6 @@ class AxiosRequestFactory {
 			const [authHeader] = await Promise.all([
 				headers['Authorization'] === undefined ? getValue(this._opts?.authHeader) : null, // Don't bother fetching the authHeader if we already have "Authorization" header set
 			]);
-
-			// Check for cancellation after fetching auth
-			if (next.options?.cancellationToken?.isCancelled) throw new CancellationError();
 
 			// Set the authorization header if we got one back
 			if (authHeader) {
@@ -222,17 +216,14 @@ class AxiosRequestFactory {
 			// Wait again for any rate limiting to finish because some might have been introduced since we checked before
 			await this._waitForRateLimit();
 
-			// Check for cancellation before making actual requests (after beforeExec commands)
-			if (next.options?.cancellationToken?.isCancelled) throw new CancellationError();
+			if (globalThis.axios_request_factory_debug || this._opts?.debug) {
+				console.log(`[ARF#${this._id}] Start: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
+			}
 
 			// Get mock response
 			const mockRepsonse = (await getValue(next.options?.mockResponse)) ?? await getValue(this._opts?.mockResponse);
 
 			if (mockRepsonse == null) {
-
-				if (globalThis.axios_request_factory_debug || this._opts?.debug) {
-					console.log(`[ARF#${this._id}] Start: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
-				}
 
 				// Make the actual request
 				resp = await this.axios(next.axiosConfig);
@@ -253,17 +244,10 @@ class AxiosRequestFactory {
 
 		if (globalThis.axios_request_factory_debug || this._opts?.debug) {
 			if (errored) {
-				if (err instanceof CancellationError) {
-					console.warn(`[ARF#${this._id}] Cncld: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
-				}
 				console.error(`[ARF#${this._id}] Error: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
 			} else {
 				console.log(`[ARF#${this._id}]  Done: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
 			}
-		}
-		// If errored, exit
-		if (errored && err instanceof CancellationError) {
-			return;
 		}
 
 		// Execute callbacks
@@ -321,6 +305,7 @@ class AxiosRequestFactory {
 							next.rej(err);
 						}
 					} else {
+						resp.cacheWritePromise = this.writeToCache(resp, next);
 						next.res(resp);
 					}
 				}
@@ -363,7 +348,142 @@ class AxiosRequestFactory {
 
 	}
 
+	async readFromCache(next) {
+
+		const cachePath = next.options?.cachePath;
+		const cacheKey = next.options?.cacheKey;
+		if (!fs || !cachePath || !cacheKey) {
+			return undefined;
+		}
+
+		const { filePath, dataPath, folderPath } = getCachingFilePath(cachePath, cacheKey);
+
+		const result = await fs.promises.readFile(filePath).catch((err) => {
+			if (err?.code === 'ENOENT') {
+				return undefined
+			}
+			throw err;
+		});
+
+		if (result == null) {
+			return undefined;
+		}
+
+		const resp = JSON.parse(result);
+
+		const specifiedEncoding = resp._arfEncoding
+
+		if (next.axiosConfig?.responseType === 'stream') {
+
+			resp.data = fs.createReadStream(resp._dataPath, resp._arfEncoding);
+
+		} else {
+
+			const content = await fs.promises.readFile(resp._dataPath, {encoding: resp._arfEncoding});
+
+		}
+
+	}
+
+	writeToCache(resp, next) {
+
+		const cachePath = next.options?.cachePath;
+		const cacheKey = next.options?.cacheKey;
+		if (!fs || !cachePath || !cacheKey) {
+			return undefined;
+		}
+
+		let writeStream;
+
+		const { filePath, dataPath } = getCachingFilePath(cachePath, cacheKey);
+
+		let written = false;
+
+		return noop().then(async () => {
+
+			const data = resp.data;
+
+			const cacheObj = {
+				status: resp.status,
+				headers: resp.headers,
+				_arfDataPath: dataPath,
+				_arfFilePath: filePath,
+			}
+
+			let contentToWrite;
+
+			if (typeof data.pipe === 'function' && typeof data.once === 'function') {
+				resp._arfDataType = 'stream';
+				resp._arfEncoding = data.readableEncoding;
+				console.log('Debug: file://' + filePath);
+				writeStream = fs.createWriteStream(filePath, {encoding: data.readableEncoding});
+				writeStream.on('error', (err) => {
+					this.logger.error({
+						message: 'Error writing to stream cache',
+						req_factory_id: `${this._id}`,
+						cause: err
+					});
+				});
+				data.once('data', (firstChunk) => {
+					writeStream.write(firstChunk);
+					data.on('data', (chunk) => {
+						writeStream.write(chunk);
+					});
+				});
+			} else if (data instanceof Buffer) {
+				resp._arfDataType = 'buffer';
+				resp._arfEncoding = undefined;
+				contentToWrite = data;
+			} else if (typeof data === 'string') {
+				resp._arfDataType = 'string';
+				resp._arfEncoding = 'utf-8';
+				contentToWrite = data
+			} else if (typeof data === 'object') {
+				resp._arfDataType = 'object';
+				resp._arfEncoding = 'utf-8';
+				contentToWrite = JSON.stringify(data);
+			} else {
+				throw new Error(`Could not determine how to cache response of type ${typeof data}`);
+			}
+
+			if (contentToWrite) {
+				await fs.promises.writeFile(dataPath, contentToWrite, resp._arfEncoding);
+			}
+
+			// Make sure to write this one SECOND so that we aren't "ready to read" before the data is written (we should NOT do them at the same time)
+			await fs.promises.writeFile(filePath, JSON.stringify(cacheObj), 'utf-8');
+
+			written = true;
+
+		}).catch((err) => {
+			this.logger.error({
+				message: 'Error handling caching',
+				req_factory_id: `${this._id}`,
+				cause: err
+			});
+			const promises = [fs.promises.rm(filePath, {force: true})];
+			promises.push(
+				new Promise((res, rej) => writeStream ? writeStream.close((err) => err ? rej(err) : res()) : res())
+					.then(() => fs.promises.rm(dataPath, {force: true}))
+			);
+			return Promise.all(promises);
+		}).catch((err) => {
+			this.logger.error({
+				message: 'Error clearing-up data after caching error',
+				req_factory_id: `${this._id}`,
+				cause: err
+			});
+		}).then(() => {
+			return {
+				written
+			};
+		});
+
+	}
+
 }
+
+const noop = async () => {}
 
 const randomString = (length) => {
     let output = '';
@@ -413,6 +533,22 @@ const createUniqueId = (id, axiosInstanceOpts) => {
 			return test;
 		}
 	}
+
+}
+
+const getCachingFilePath = (cachePath, url) => {
+
+	const encoded = encodeURIComponent(url).replace(/\*/g, '%2A');
+
+	const folderPath = path.resolve(cachePath);
+
+	const dataPath = path.join(folderPath, encoded);	
+
+	return {
+		folderPath,
+		filePath: dataPath + '.json',
+		dataPath,
+	};
 
 }
 
