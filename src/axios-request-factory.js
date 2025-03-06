@@ -1,9 +1,19 @@
 
 const axios = require('axios').default;
 let fs;
+let path;
+let stream;
 if (typeof window === 'undefined') {
 	try {
 		fs = require('fs');
+	} catch (err) {
+	}
+	try {
+		path = require('path');
+	} catch (err) {
+	}
+	try {
+		stream = require('stream');
 	} catch (err) {
 	}
 }
@@ -13,6 +23,20 @@ const getValue = async (input) => {
 		return await input();
 	}
 	return input;
+}
+
+class CacheRewriteArfError extends Error {
+
+	constructor(status, headers, data, code, message) {
+		super(message);
+		this.response = {
+			status,
+			headers,
+			data,
+		}
+		this.code = code;
+	}
+
 }
 
 class AxiosRequestFactory {
@@ -54,6 +78,8 @@ class AxiosRequestFactory {
 				this._queue.push(obj);
 				this.triggerNext();	
 			}
+		}).catch((err) => {
+			obj.rej(err);
 		});
 
 	}
@@ -286,6 +312,34 @@ class AxiosRequestFactory {
 
 		} finally {
 
+			const handleError = () => {
+				const cacheRewriteErrorCode = next.options?.cacheRewriteErrorCode?.(err);
+				if (cacheRewriteErrorCode == null) {
+					next.rej(err);
+				} else {
+					const newErr = new CacheRewriteArfError(resp.status, resp.headers, resp.data, cacheRewriteErrorCode, err.message);
+					newErr.cacheWritePromise = this.writeToCache(resp, next, newErr);
+					if (newErr.cacheWritePromise && next.options?.waitForCacheWriteBeforeReturning) {
+						newErr.cacheWritePromise.finally(() => {
+							next.rej(newErr);
+						});
+					} else {
+						next.rej(newErr);
+					}
+				}
+			}
+
+			const handleSuccess = () => {
+				resp.cacheWritePromise = this.writeToCache(resp, next, null);
+				if (resp.cacheWritePromise && next.options?.waitForCacheWriteBeforeReturning) {
+					resp.cacheWritePromise.finally(() => {
+						next.res(resp);
+					});
+				} else {
+					next.res(resp);
+				}
+			}
+
 			try {
 
 				// Assuming next is defined, we either need to add it back to the front of the queue it reject/resolve its promise
@@ -297,16 +351,15 @@ class AxiosRequestFactory {
 							}
 							const maxAttempts = (await getValue(this._opts?.maxAttempts)) ?? 1;
 							if (next.failedAttempts >= maxAttempts) {
-								next.rej(err);
+								handleError();
 							} else {
 								this._specialRetryQueue.push(next);
 							}
 						} else {
-							next.rej(err);
+							handleError();
 						}
 					} else {
-						resp.cacheWritePromise = this.writeToCache(resp, next);
-						next.res(resp);
+						handleSuccess();
 					}
 				}
 
@@ -356,9 +409,9 @@ class AxiosRequestFactory {
 			return undefined;
 		}
 
-		const { filePath, dataPath, folderPath } = getCachingFilePath(cachePath, cacheKey);
+		const { filePath } = getCachingFilePath(cachePath, cacheKey);
 
-		const result = await fs.promises.readFile(filePath).catch((err) => {
+		const result = await fs.promises.readFile(filePath, 'utf-8').catch((err) => {
 			if (err?.code === 'ENOENT') {
 				return undefined
 			}
@@ -371,21 +424,40 @@ class AxiosRequestFactory {
 
 		const resp = JSON.parse(result);
 
-		const specifiedEncoding = resp._arfEncoding
+		if (resp.error && !next.options.cacheIgnoreErrors) {
+			throw new CacheRewriteArfError(resp.status, resp.headers, resp.error.data, resp.error.code, resp.error.message);
+		}
+
+		const specifiedEncoding = resp._arfDataEncoding
 
 		if (next.axiosConfig?.responseType === 'stream') {
 
-			resp.data = fs.createReadStream(resp._dataPath, resp._arfEncoding);
+			resp.data = fs.createReadStream(resp._arfDataPath, {encoding: specifiedEncoding});
 
 		} else {
 
-			const content = await fs.promises.readFile(resp._dataPath, {encoding: resp._arfEncoding});
+			let data = await fs.promises.readFile(resp._arfDataPath, {encoding: specifiedEncoding});
+
+			if (resp._arfDataType === 'object') {
+				data = JSON.parse(data);
+			}
+
+			resp.data = data;
 
 		}
 
+		return resp;
+
 	}
 
-	writeToCache(resp, next) {
+	/**
+	 * 
+	 * @param {any} resp 
+	 * @param {any} next 
+	 * @param {CacheRewriteArfError} err 
+	 * @returns {undefined|Promise<{written: boolean}>} This function purposefully don't always return a promise! If we're not caching then we want resp.cacheWritePromise to be undefined, not an instantly resolved promise
+	 */
+	writeToCache(resp, next, err) {
 
 		const cachePath = next.options?.cachePath;
 		const cacheKey = next.options?.cacheKey;
@@ -394,8 +466,9 @@ class AxiosRequestFactory {
 		}
 
 		let writeStream;
+		let passthroughStream;
 
-		const { filePath, dataPath } = getCachingFilePath(cachePath, cacheKey);
+		const { filePath, dataPath, folderPath } = getCachingFilePath(cachePath, cacheKey);
 
 		let written = false;
 
@@ -406,51 +479,69 @@ class AxiosRequestFactory {
 			const cacheObj = {
 				status: resp.status,
 				headers: resp.headers,
-				_arfDataPath: dataPath,
 				_arfFilePath: filePath,
+			}
+
+			if (err) {
+				cacheObj.error = {
+					code: err.code,
+					message: err.message,
+					data: typeof data.pipe === 'function' ? null : err.data,
+				};
+			} else {
+				cacheObj._arfDataPath = dataPath;
 			}
 
 			let contentToWrite;
 
-			if (typeof data.pipe === 'function' && typeof data.once === 'function') {
-				resp._arfDataType = 'stream';
-				resp._arfEncoding = data.readableEncoding;
-				console.log('Debug: file://' + filePath);
-				writeStream = fs.createWriteStream(filePath, {encoding: data.readableEncoding});
-				writeStream.on('error', (err) => {
-					this.logger.error({
-						message: 'Error writing to stream cache',
-						req_factory_id: `${this._id}`,
-						cause: err
-					});
-				});
+			////// IMPORTANT NOTE ABOUT THE STREAMING CASE ////////
+			// Do not put any "async/await" operations before we start the streaming, otherwise if the consumer attaches a listener straight away then we usually don't get to attach the listeners before the streaming starts. This is why we have this weird situation where we push data into a passthrough and then pipe the passthrough to the writestream AFTER the directory has been made
+
+			if (cacheObj.error) {
+				//do nothing
+			} else if (typeof data.pipe === 'function' && typeof data.once === 'function') {
+				cacheObj._arfDataType = 'stream';
+				cacheObj._arfDataEncoding = data.readableEncoding;
+				passthroughStream = new stream.PassThrough();
 				data.once('data', (firstChunk) => {
-					writeStream.write(firstChunk);
+					passthroughStream.write(firstChunk);
 					data.on('data', (chunk) => {
-						writeStream.write(chunk);
+						passthroughStream.write(chunk);
 					});
 				});
 			} else if (data instanceof Buffer) {
-				resp._arfDataType = 'buffer';
-				resp._arfEncoding = undefined;
+				cacheObj._arfDataType = 'buffer';
+				cacheObj._arfDataEncoding = undefined;
 				contentToWrite = data;
 			} else if (typeof data === 'string') {
-				resp._arfDataType = 'string';
-				resp._arfEncoding = 'utf-8';
+				cacheObj._arfDataType = 'string';
+				cacheObj._arfDataEncoding = 'utf-8';
 				contentToWrite = data
 			} else if (typeof data === 'object') {
-				resp._arfDataType = 'object';
-				resp._arfEncoding = 'utf-8';
+				cacheObj._arfDataType = 'object';
+				cacheObj._arfDataEncoding = 'utf-8';
 				contentToWrite = JSON.stringify(data);
 			} else {
 				throw new Error(`Could not determine how to cache response of type ${typeof data}`);
 			}
 
+			await fs.promises.mkdir(folderPath, {recursive: true});
+
+			if (passthroughStream) {
+				writeStream = fs.createWriteStream(dataPath, {encoding: data.readableEncoding});
+				passthroughStream.pipe(writeStream);
+				await new Promise((res, rej) => {
+					data.on('error', rej);
+					passthroughStream.on('error', rej);
+					writeStream.on('error', rej);
+					writeStream.on('end', res);
+				});
+			}
 			if (contentToWrite) {
-				await fs.promises.writeFile(dataPath, contentToWrite, resp._arfEncoding);
+				await fs.promises.writeFile(dataPath, contentToWrite, cacheObj._arfDataEncoding);
 			}
 
-			// Make sure to write this one SECOND so that we aren't "ready to read" before the data is written (we should NOT do them at the same time)
+			// Make sure to write this one AFTER the main data file so that we don't signal that the request is cached before the data is written (we should NOT write both files at the same time because the main file will likely finish first)
 			await fs.promises.writeFile(filePath, JSON.stringify(cacheObj), 'utf-8');
 
 			written = true;
@@ -462,10 +553,16 @@ class AxiosRequestFactory {
 				cause: err
 			});
 			const promises = [fs.promises.rm(filePath, {force: true})];
-			promises.push(
-				new Promise((res, rej) => writeStream ? writeStream.close((err) => err ? rej(err) : res()) : res())
-					.then(() => fs.promises.rm(dataPath, {force: true}))
-			);
+			if (writeStream) {
+				promises.push(
+					new Promise((res, rej) => writeStream.close((err) => err ? rej(err) : res())).then(() => fs.promises.rm(dataPath, {force: true}))
+				);
+			}
+			if (passthroughStream) {
+				promises.push(
+					new Promise((res, rej) => passthroughStream.close((err) => err ? rej(err) : res()))
+				);
+			}
 			return Promise.all(promises);
 		}).catch((err) => {
 			this.logger.error({
