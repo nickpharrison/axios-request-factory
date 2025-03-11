@@ -18,6 +18,19 @@ if (typeof window === 'undefined') {
 	}
 }
 
+const parseAuthHeader = (auth) => {
+	if (typeof auth === 'string') {
+		return auth;
+	}
+	if (auth.username != null && auth.password != null) {
+		return `Basic ${Buffer.from(auth.username + ':' + auth.password, 'utf-8').toString('base64')}`;
+	}
+	if (auth.bearer != null) {
+		return `Bearer ${auth.bearer}`;
+	}
+	throw new Error(`Could not parse auth header`);
+}
+
 const getValue = async (input) => {
 	if (typeof input === 'function') {
 		return await input();
@@ -37,6 +50,12 @@ class CacheRewriteArfError extends Error {
 		this.code = code;
 	}
 
+}
+
+class CancellationArfError extends Error {
+	constructor() {
+		super(`Cancelled`);
+	}
 }
 
 class AxiosRequestFactory {
@@ -85,6 +104,7 @@ class AxiosRequestFactory {
 	}
 
 	getNextQueueItem() {
+		this.removeCancelledFromQueue();
 		if (this._specialRetryQueue.length !== 0) {
 			return this._specialRetryQueue.shift();
 		}
@@ -111,7 +131,22 @@ class AxiosRequestFactory {
 			return undefined;
 		}
 		this._queue.splice(currentIndex, 1);
+		i -= 1;
 		return currentObj;
+	}
+
+	removeCancelledFromQueue() {
+		const checkQueue = (queue) => {
+			for (let i = 0; i < queue.length; i += 1) {
+				if (queue[i].options.cancellationToken?.isCancelled) {
+					const removed = queue.splice(i, 1)[0];
+					removed.rej(new CancellationArfError());
+					i -= 1;
+				}
+			}
+		};
+		checkQueue(this._queue);
+		checkQueue(this._specialRetryQueue);
 	}
 
 	/**
@@ -134,6 +169,16 @@ class AxiosRequestFactory {
 			}
 
 			const obj = {res, rej, axiosConfig, options, failedAttempts: 0};
+
+			if (options.cancellationToken?.isCancelled) {
+				return rej(new CancellationArfError());
+			}
+
+			if (typeof options.cancellationToken?.on === 'function') {
+				options.cancellationToken.on('cancel', () => {
+					this.removeCancelledFromQueue();
+				});
+			}
 
 			try {
 				this.addQueueItemToQueue(obj);
@@ -189,7 +234,10 @@ class AxiosRequestFactory {
 		let errored = false;
 		let err;
 		let next;
+		let mockResponse;
 		let countAsAttemptOnFailure = true;
+		let reattemptOn;
+		let statusForReattempt;
 
 		try {
 
@@ -211,6 +259,10 @@ class AxiosRequestFactory {
 			}
 			this._currentOngoingRequests += 1;
 
+			if (next.options?.cancellationToken?.isCancelled) {
+				throw new CancellationArfError();
+			}
+
 			// Create headers object if it doesn't exist and make a shorthand for it
 			if (next.axiosConfig.headers == null) {
 				next.axiosConfig.headers = {};
@@ -224,7 +276,11 @@ class AxiosRequestFactory {
 
 			// Set the authorization header if we got one back
 			if (authHeader) {
-				headers['Authorization'] = authHeader;
+				headers['Authorization'] = parseAuthHeader(authHeader);
+			}
+
+			if (next.options?.cancellationToken?.isCancelled) {
+				throw new CancellationArfError();
 			}
 
 			// Execute callbacks
@@ -247,16 +303,18 @@ class AxiosRequestFactory {
 			}
 
 			// Get mock response
-			const mockRepsonse = (await getValue(next.options?.mockResponse)) ?? await getValue(this._opts?.mockResponse);
+			if (process.env.ARF_USE_MOCK_RESPONSES?.toLowerCase() === 'true') {
+				mockResponse = (await getValue(next.options?.mockResponse)) ?? (await getValue(this._opts?.mockResponse));
+			}
 
-			if (mockRepsonse == null) {
+			if (mockResponse == null) {
 
 				// Make the actual request
 				resp = await this.axios(next.axiosConfig);
 
 			} else {
 
-				resp = mockRepsonse;
+				resp = mockResponse;
 
 			}
 
@@ -268,36 +326,37 @@ class AxiosRequestFactory {
 
 		}
 
-		if (globalThis.axios_request_factory_debug || this._opts?.debug) {
-			if (errored) {
-				console.error(`[ARF#${this._id}] Error: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
-			} else {
-				console.log(`[ARF#${this._id}]  Done: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
-			}
-		}
-
-		// Execute callbacks
-		await this._opts?.afterExec?.({
-			errored: errored,
-			error: err,
-			axiosConfig: next.axiosConfig,
-			resp: resp,
-			previousAttempts: next.failedAttempts ?? 0,
-		});
-
-		await next.options?.afterExec?.({
-			errored: errored,
-			error: err,
-			axiosConfig: next.axiosConfig,
-			resp: resp,
-			previousAttempts: next.failedAttempts ?? 0,
-		});
-
-		const reattemptOn = (await getValue(this._opts?.reattemptOn)) ?? ['NoStatusCode'];
-
-		const statusForReattempt = resp?.status ?? 'NoStatusCode';
-
 		try {
+
+			if (globalThis.axios_request_factory_debug || this._opts?.debug) {
+				if (errored) {
+					console.error(`[ARF#${this._id}] Error: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
+				} else {
+					console.log(`[ARF#${this._id}]  Done: ${next.axiosConfig.method ?? 'GET'} ${next.axiosConfig.baseURL ?? ''}${next.axiosConfig.url}`);
+				}
+			}
+	
+			// Execute callbacks if there is actually a response (don't bother for some otehr kind of error (like runtime error))
+			if (!errored || resp) {
+				await this._opts?.afterExec?.({
+					errored: errored,
+					error: err,
+					axiosConfig: next.axiosConfig,
+					resp: resp,
+					previousAttempts: next.failedAttempts ?? 0,
+				});
+		
+				await next.options?.afterExec?.({
+					errored: errored,
+					error: err,
+					axiosConfig: next.axiosConfig,
+					resp: resp,
+					previousAttempts: next.failedAttempts ?? 0,
+				});
+			}
+	
+			reattemptOn = (await getValue(this._opts?.reattemptOn)) ?? ['NoStatusCode'];
+			statusForReattempt = resp?.status ?? 'NoStatusCode';
 
 			// TODO: To add more handling here
 			switch (resp?.status) {
@@ -312,40 +371,61 @@ class AxiosRequestFactory {
 
 		} finally {
 
-			const handleError = () => {
-				const cacheRewriteErrorCode = next.options?.cacheRewriteErrorCode?.(err);
-				if (cacheRewriteErrorCode == null) {
-					next.rej(err);
-				} else {
+			try {
+
+				const getWaitForCacheWriteBeforeReturning = async () => (await getValue(next.options?.waitForCacheWriteBeforeReturning)) ?? (await getValue(this._opts?.waitForCacheWriteBeforeReturning));
+
+				const handleError = () => {
+					if (mockResponse != null) {
+						return next.rej(err);
+					}
+					const cacheRewriteErrorCode = next.options?.cacheRewriteErrorCode?.(err);
+					if (cacheRewriteErrorCode == null) {
+						return next.rej(err);
+					}
 					const newErr = new CacheRewriteArfError(resp.status, resp.headers, resp.data, cacheRewriteErrorCode, err.message);
 					newErr.cacheWritePromise = this.writeToCache(resp, next, newErr);
-					if (newErr.cacheWritePromise && next.options?.waitForCacheWriteBeforeReturning) {
-						newErr.cacheWritePromise.finally(() => {
-							next.rej(newErr);
-						});
+					if (newErr.cacheWritePromise) {
+						getWaitForCacheWriteBeforeReturning().then((wait) => {
+							if (wait) {
+								newErr.cacheWritePromise.finally(() => {
+									next.rej(newErr);
+								});
+							} else {
+								next.rej(newErr);
+							}
+						})
 					} else {
 						next.rej(newErr);
 					}
 				}
-			}
-
-			const handleSuccess = () => {
-				resp.cacheWritePromise = this.writeToCache(resp, next, null);
-				if (resp.cacheWritePromise && next.options?.waitForCacheWriteBeforeReturning) {
-					resp.cacheWritePromise.finally(() => {
+	
+				const handleSuccess = () => {
+					if (mockResponse != null) {
+						return next.res(resp);
+					}
+					resp.cacheWritePromise = this.writeToCache(resp, next, null);
+					if (resp.cacheWritePromise) {
+						getWaitForCacheWriteBeforeReturning().then((wait) => {
+							if (wait) {
+								resp.cacheWritePromise.finally(() => {
+									next.res(resp);
+								});
+							} else {
+								next.res(resp);
+							}
+						});
+					} else {
 						next.res(resp);
-					});
-				} else {
-					next.res(resp);
+					}
 				}
-			}
-
-			try {
-
+	
 				// Assuming next is defined, we either need to add it back to the front of the queue it reject/resolve its promise
 				if (next) {
 					if (errored) {
-						if (reattemptOn.includes(statusForReattempt)) {
+						if (err instanceof CancellationArfError) {
+							// do nothing
+						} else if (reattemptOn.includes(statusForReattempt)) {
 							if (countAsAttemptOnFailure) {
 								next.failedAttempts += 1;
 							}
@@ -472,7 +552,7 @@ class AxiosRequestFactory {
 
 		let written = false;
 
-		return noop().then(async () => {
+		return Promise.resolve().then(async () => {
 
 			const data = resp.data;
 
@@ -509,6 +589,12 @@ class AxiosRequestFactory {
 						passthroughStream.write(chunk);
 					});
 				});
+				data.on('end', () => {
+					passthroughStream.end();
+				});
+				data.on('error', (err) => {
+					passthroughStream.emit('error', err);
+				});
 			} else if (data instanceof Buffer) {
 				cacheObj._arfDataType = 'buffer';
 				cacheObj._arfDataEncoding = undefined;
@@ -531,10 +617,12 @@ class AxiosRequestFactory {
 				writeStream = fs.createWriteStream(dataPath, {encoding: data.readableEncoding});
 				passthroughStream.pipe(writeStream);
 				await new Promise((res, rej) => {
-					data.on('error', rej);
-					passthroughStream.on('error', rej);
-					writeStream.on('error', rej);
-					writeStream.on('end', res);
+					writeStream.on('error', (err) => {
+						rej(err);
+					});
+					writeStream.on('close', () => {
+						res();
+					});
 				});
 			}
 			if (contentToWrite) {
@@ -579,8 +667,6 @@ class AxiosRequestFactory {
 	}
 
 }
-
-const noop = async () => {}
 
 const randomString = (length) => {
     let output = '';
