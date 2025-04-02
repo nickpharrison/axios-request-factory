@@ -131,7 +131,6 @@ class AxiosRequestFactory {
 			return undefined;
 		}
 		this._queue.splice(currentIndex, 1);
-		i -= 1;
 		return currentObj;
 	}
 
@@ -157,6 +156,8 @@ class AxiosRequestFactory {
 	 */
 	request(axiosConfig, options) {
 
+		let cancellationFunction;
+
 		return new Promise((res, rej) => {
 
 			if (axiosConfig == null) {
@@ -175,9 +176,10 @@ class AxiosRequestFactory {
 			}
 
 			if (typeof options.cancellationToken?.on === 'function') {
-				options.cancellationToken.on('cancel', () => {
+				cancellationFunction = () => {
 					this.removeCancelledFromQueue();
-				});
+				};
+				options.cancellationToken.on('cancel', cancellationFunction);
 			}
 
 			try {
@@ -186,6 +188,10 @@ class AxiosRequestFactory {
 				rej(err);
 			}
 
+		}).finally(() => {
+			if (cancellationFunction) {
+				options.cancellationToken.off('cancel', cancellationFunction);
+			}
 		});
 
 	}
