@@ -38,6 +38,8 @@ const getValue = async (input) => {
 	return input;
 }
 
+const ALLOWED_METHODS = typeof process !== 'undefined' && process.env.ARF_ALLOWED_METHODS ? process.env.ARF_ALLOWED_METHODS.split(',').map(x => x.trim().toUpperCase()) : null;
+
 class CacheRewriteArfError extends Error {
 
 	constructor(status, headers, data, code, message) {
@@ -287,6 +289,13 @@ class AxiosRequestFactory {
 
 			if (next.options?.cancellationToken?.isCancelled) {
 				throw new CancellationArfError();
+			}
+
+			if (next.axiosConfig.method == null) {
+				next.axiosConfig.method = 'GET';
+			}
+			if (ALLOWED_METHODS && !ALLOWED_METHODS.includes(next.axiosConfig.method.toUpperCase())) {
+				throw new Error(`Tried to condict a "${next.axiosConfig.method.toUpperCase()}" request, but this is not one of the allowed methods: ${ALLOWED_METHODS.join(', ')}`);
 			}
 
 			// Execute callbacks
