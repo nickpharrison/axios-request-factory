@@ -294,8 +294,10 @@ class AxiosRequestFactory {
 			if (next.axiosConfig.method == null) {
 				next.axiosConfig.method = 'GET';
 			}
-			if (ALLOWED_METHODS && !ALLOWED_METHODS.includes(next.axiosConfig.method.toUpperCase())) {
-				throw new Error(`Tried to condict a "${next.axiosConfig.method.toUpperCase()}" request, but this is not one of the allowed methods: ${ALLOWED_METHODS.join(', ')}`);
+
+			const allowedMethods = next.options.allowedMethods ?? this._opts.allowedMethods ?? ALLOWED_METHODS;
+			if (allowedMethods && !allowedMethods.map(x => x.toUpperCase()).includes(next.axiosConfig.method.toUpperCase())) {
+				throw new Error(`Tried to conduct a "${next.axiosConfig.method.toUpperCase()}" request to "${next.axiosConfig.url}", but this is not one of the allowed methods: ${allowedMethods.join(', ')}`);
 			}
 
 			// Execute callbacks
