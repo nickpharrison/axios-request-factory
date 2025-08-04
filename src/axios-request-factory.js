@@ -78,6 +78,11 @@ class AxiosRequestFactory {
 
 		this._currentOngoingRequests = 0;
 
+		// Custom rate limiting properties
+		this._customRateLimit = this._opts?.customRateLimit;
+		this._requestTimestamps = [];
+		this._lastCleanup = Date.now();
+
 		this.axios = axios.create(this._opts?.axiosInstanceOptions);
 
 		this._id = createUniqueId(this._opts?.id, this._opts?.axiosInstanceOptions);
@@ -235,6 +240,60 @@ class AxiosRequestFactory {
 
 	}
 
+	_cleanupOldTimestamps() {
+		if (!this._customRateLimit || this._customRateLimit?.disabled || !this._customRateLimit?.perPeriodMs) {
+			return;
+		}
+
+		const now = Date.now();
+		// Cleanup every 10 seconds to prevent excessive cleanup operations
+		if (now - this._lastCleanup < 10000) {
+			return;
+		}
+
+		const cutoff = now - this._customRateLimit.perPeriodMs;
+		this._requestTimestamps = this._requestTimestamps.filter(timestamp => timestamp > cutoff);
+		this._lastCleanup = now;
+	}
+
+	async _waitForCustomRateLimit() {
+		if (!this._customRateLimit || this._customRateLimit?.disabled) {
+			return;
+		}
+
+		const { maxRequests, perPeriodMs } = this._customRateLimit;
+		if (!maxRequests || !perPeriodMs) {
+			return;
+		}
+
+		// Cleanup old timestamps periodically
+		this._cleanupOldTimestamps();
+
+		const now = Date.now();
+		const cutoff = now - perPeriodMs;
+		
+		// Count requests within the time window
+		const recentRequests = this._requestTimestamps.filter(timestamp => timestamp > cutoff);
+		
+		if (recentRequests.length < maxRequests) {
+			return;
+		}
+
+		// Calculate when the oldest request in the window will expire
+		const oldestInWindow = recentRequests[0];
+		const waitTime = oldestInWindow + perPeriodMs - now;
+
+		if (waitTime <= 0) {
+			return;
+		}
+
+		return new Promise((res, rej) => {
+			setTimeout(() => {
+				this._waitForCustomRateLimit().then(res).catch(rej);
+			}, waitTime);
+		});
+	}
+
 	async _trigger() {
 
 		/** @type {import('axios').AxiosResponse} */
@@ -249,7 +308,10 @@ class AxiosRequestFactory {
 
 		try {
 
-			// Wait for any rate limiting to finish
+			// Wait for custom rate limiting first (proactive)
+			await this._waitForCustomRateLimit();
+
+			// Wait for any rate limiting to finish (reactive)
 			await this._waitForRateLimit();
 
 			// Check to see if we already have the maximum number of requests going on
@@ -313,6 +375,7 @@ class AxiosRequestFactory {
 			});
 
 			// Wait again for any rate limiting to finish because some might have been introduced since we checked before
+			await this._waitForCustomRateLimit();
 			await this._waitForRateLimit();
 
 			if (globalThis.axios_request_factory_debug || this._opts?.debug) {
@@ -328,6 +391,11 @@ class AxiosRequestFactory {
 
 				// Make the actual request
 				resp = await this.axios(next.axiosConfig);
+
+				// Track successful request timestamp for custom rate limiting
+				if (this._customRateLimit && !this._customRateLimit?.disabled) {
+					this._requestTimestamps.push(Date.now());
+				}
 
 			} else {
 
